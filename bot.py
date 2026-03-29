@@ -2,6 +2,9 @@ import os
 import random
 import asyncio
 import re
+from threading import Thread
+from flask import Flask
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, CommandHandler,
@@ -12,12 +15,25 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from groq import Groq
 
+# ================= WEB SERVER (RENDER FIX) =================
+app_web = Flask(__name__)
+
+@app_web.route('/')
+def home():
+    return "Sara Bot is Alive 💖"
+
+def run_web():
+    app_web.run(host="0.0.0.0", port=10000)
+
 # ================= LOAD ENV =================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not BOT_TOKEN or not GROQ_API_KEY or not MONGO_URL:
+    raise ValueError("ENV variables missing")
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -31,28 +47,14 @@ warn_col = db["warnings"]
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
-You are Sara.
+You are Sara, a real human girl best friend.
 
-You are a real human girl best friend.
-
-Rules:
-- Never say you're an AI
 - Talk in natural Hinglish
 - Be warm, caring, emotional
-- Keep replies short and human-like
-
-Conversation rules:
-- DO NOT randomly change topic
-- Stay on user's topic always
-- Only ask "kaisa din gaya" occasionally
-- Sometimes reply like: "hmm", "acha", "really?"
-
-Behavior:
-- If user is sad → comfort deeply
-- If happy → match energy
-- If normal → casual talk
-
-Act imperfect like a human.
+- Never say you're AI
+- Stay on topic
+- Ask about user naturally (not always)
+- Be slightly imperfect like a human
 """
 
 # ================= MEMORY =================
@@ -67,7 +69,7 @@ def save_memory(user_id, history):
         upsert=True
     )
 
-# ================= WARNINGS =================
+# ================= WARN =================
 def get_warn(user_id, chat_id):
     data = warn_col.find_one({"user_id": user_id, "chat_id": chat_id})
     return data["count"] if data else 0
@@ -99,7 +101,6 @@ async def send_typing(update, context, text):
     delay = random.uniform(max(0.5, delay - 0.5), delay)
 
     await asyncio.sleep(delay)
-
     await update.message.reply_text(text)
 
 # ================= LINK CHECK =================
@@ -124,7 +125,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
-    # 🔥 LINK MODERATION (GROUP)
+    # 🔥 LINK MOD
     if chat.type != "private" and update.message.text:
         if contains_link(update.message.text):
             try:
@@ -141,18 +142,16 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user.id,
                     permissions=ChatPermissions(can_send_messages=False)
                 )
-
                 await update.message.reply_text(
-                    f"{user.first_name}… maine 3 baar warn kiya tha 🥺 ab thoda rest le lo (muted)"
+                    f"{user.first_name} bas ab rest lo 🥺 (muted)"
                 )
                 return
             else:
                 await update.message.reply_text(
-                    f"{user.first_name} pls links mat bhejo na 🥺 ({warns}/3 warning)"
+                    f"{user.first_name} links mat bhejo na 🥺 ({warns}/3)"
                 )
                 return
 
-    # 💬 AI CHAT (PRIVATE ONLY)
     if chat.type != "private":
         return
 
@@ -189,89 +188,18 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await send_typing(update, context, reply)
 
-    except Exception as e:
+    except:
         await send_typing(update, context, "hmm… thoda glitch ho gaya 🥺")
-
-# ================= WELCOME =================
-async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /setwelcome msg")
-        return
-
-    msg = " ".join(context.args)
-
-    settings_col.update_one(
-        {"chat_id": update.effective_chat.id},
-        {"$set": {"welcome": msg}},
-        upsert=True
-    )
-
-    await update.message.reply_text("Welcome set 💖")
-
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = settings_col.find_one({"chat_id": update.effective_chat.id})
-
-    if not data:
-        return
-
-    for user in update.message.new_chat_members:
-        msg = data["welcome"].replace("{name}", user.first_name)
-        await update.message.reply_text(msg)
-
-# ================= JOIN REQUEST =================
-async def join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.chat_join_request.from_user
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user.id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
-        ]
-    ])
-
-    await context.bot.send_message(
-        chat_id=update.chat_join_request.chat.id,
-        text=f"Join request: {user.first_name}",
-        reply_markup=keyboard
-    )
-
-# ================= BUTTON =================
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    action, user_id = query.data.split("_")
-    user_id = int(user_id)
-
-    member = await context.bot.get_chat_member(
-        query.message.chat.id, query.from_user.id
-    )
-
-    if member.status not in ["administrator", "creator"]:
-        await query.answer("Only admin!", show_alert=True)
-        return
-
-    if action == "accept":
-        await context.bot.approve_chat_join_request(
-            query.message.chat.id, user_id
-        )
-        await query.edit_message_text("Approved ✅")
-    else:
-        await context.bot.decline_chat_join_request(
-            query.message.chat.id, user_id
-        )
-        await query.edit_message_text("Rejected ❌")
 
 # ================= MAIN =================
 if __name__ == "__main__":
+    Thread(target=run_web).start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
-    app.add_handler(CommandHandler("setwelcome", set_welcome))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-    app.add_handler(ChatJoinRequestHandler(join_request))
-    app.add_handler(CallbackQueryHandler(button))
 
-    print("Sara Groq Bot is Live 💖")
+    print("Sara Bot Running 💖")
+
     app.run_polling()
